@@ -39,7 +39,7 @@ func registerStatusTool(server *mcpsdk.Server, cfg *ServerConfig) {
 			"balance_lamports": uint64(0),
 			"default_inbox":    fileCfg.DefaultInbox,
 			"tor_enabled":      cfg.TorEnabled,
-			"max_message_size": ghostcrypto.MaxMessageSize(),
+			"max_message_size": ghostcrypto.MaxMessageSizeV1(),
 		}
 
 		client, clientErr := resolveClient(cfg, input.RPCURL)

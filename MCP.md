@@ -93,6 +93,21 @@ Using environment variables:
 
 ### Claude Code
 
+#### Option 1: CLI command (recommended)
+
+```bash
+# Add GhostLink MCP server to your project
+claude mcp add ghostlink /path/to/ghostlink -- mcp --password ""
+
+# With private key (no wallet file needed)
+claude mcp add ghostlink /path/to/ghostlink -- mcp --private-key "<BASE58_PRIVATE_KEY>"
+
+# Verify the server is registered
+claude mcp list
+```
+
+#### Option 2: Project config file
+
 Add to your project's `.mcp.json`:
 
 ```json
@@ -104,6 +119,33 @@ Add to your project's `.mcp.json`:
     }
   }
 }
+```
+
+#### Option 3: User-level config
+
+Add to `~/.claude/settings.json` to make GhostLink available across all projects:
+
+```json
+{
+  "mcpServers": {
+    "ghostlink": {
+      "command": "/path/to/ghostlink",
+      "args": ["mcp", "--password", ""]
+    }
+  }
+}
+```
+
+#### Verify connection
+
+After configuration, start Claude Code and check that GhostLink tools are available:
+
+```
+> /mcp
+
+# You should see "ghostlink" listed with 9 tools:
+# status, wallet_create, wallet_import, wallet_balance, wallet_airdrop,
+# send_message, receive_messages, inbox_create, inbox_list
 ```
 
 ### Other MCP Clients
@@ -150,7 +192,7 @@ Query GhostLink system status including RPC connectivity, wallet info, balance, 
   "balance_lamports": 1500000000,
   "default_inbox": "agent-inbox",
   "tor_enabled": false,
-  "max_message_size": 344
+  "max_message_size": 340
 }
 ```
 
@@ -287,9 +329,9 @@ Encrypt a message and send it to a recipient via a Solana Memo transaction. Mess
 
 **Message size limits:**
 
-- Max plaintext message: 344 bytes (~304 bytes usable after JSON envelope overhead)
-- Encrypted format: nonce (24B) + ciphertext + Poly1305 tag (16B) = max 384 bytes binary
-- After Base64 encoding: max 512 bytes (Solana Memo Program limit)
+- Max uncompressed payload: 340 bytes (after flag byte). With zlib compression, typical text messages of ~600-800 bytes will fit.
+- Wire format (V1): `GL1:` prefix (4B) + base64(nonce[24B] + NaCl_box(flag[1B] + payload)) ≤ 512 bytes (Solana Memo limit)
+- The `GL1:` prefix enables fast memo filtering without decryption. Compression is applied automatically when beneficial.
 
 **Recommendation:** Always set `wait: true` in automation to ensure the message is confirmed on-chain before proceeding.
 
@@ -466,7 +508,7 @@ When a tool call fails, the MCP protocol returns an error message. Common errors
 |---------------|-------|----------|
 | `wallet is encrypted; provide private_key param, --password flag, or GHOSTLINK_PASSWORD env` | Wallet is encrypted but no password was provided | Add `--password` at startup or pass the `private_key` parameter |
 | `failed to read wallet` | Wallet file does not exist | Call `wallet_create` first |
-| `message too long` | Message exceeds 344 bytes | Shorten the message content |
+| `message too long` | Message exceeds size limit after compression | Shorten the message content |
 | `invalid recipient address` | Recipient address format is invalid | Check the Base58 address |
 | `airdrop failed` | Devnet faucet rate limit | Wait and retry, or visit https://faucet.solana.com |
 | `insufficient balance` | Insufficient SOL balance | Call `wallet_airdrop` to fund the wallet |

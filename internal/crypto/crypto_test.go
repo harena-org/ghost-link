@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"testing"
+
+	"golang.org/x/crypto/nacl/box"
 )
 
 // generateTestKeyPair generates a fresh Ed25519 key pair for testing.
@@ -331,6 +333,307 @@ func TestKeyConversionConsistency(t *testing.T) {
 
 	if *x25519Priv1 != *x25519Priv2 {
 		t.Error("private key conversion is not deterministic")
+	}
+}
+
+// ---------- V1 Tests ----------
+
+func TestEncryptV1DecryptV1Roundtrip(t *testing.T) {
+	senderPub, senderPriv := generateTestKeyPair(t)
+	recipientPub, recipientPriv := generateTestKeyPair(t)
+
+	message := []byte("Hello, GhostLink V1! Magic header + compression.")
+
+	encrypted, err := EncryptV1(message, recipientPub, senderPriv)
+	if err != nil {
+		t.Fatalf("EncryptV1 failed: %v", err)
+	}
+
+	decrypted, err := DecryptV1(encrypted, senderPub, recipientPriv)
+	if err != nil {
+		t.Fatalf("DecryptV1 failed: %v", err)
+	}
+
+	if !bytes.Equal(decrypted, message) {
+		t.Errorf("decrypted = %q, want %q", decrypted, message)
+	}
+}
+
+func TestEncryptV1EmptyMessage(t *testing.T) {
+	senderPub, senderPriv := generateTestKeyPair(t)
+	recipientPub, recipientPriv := generateTestKeyPair(t)
+
+	encrypted, err := EncryptV1([]byte{}, recipientPub, senderPriv)
+	if err != nil {
+		t.Fatalf("EncryptV1 failed for empty message: %v", err)
+	}
+
+	decrypted, err := DecryptV1(encrypted, senderPub, recipientPriv)
+	if err != nil {
+		t.Fatalf("DecryptV1 failed for empty message: %v", err)
+	}
+
+	if len(decrypted) != 0 {
+		t.Errorf("decrypted empty message has length %d, want 0", len(decrypted))
+	}
+}
+
+func TestEncryptV1ShortMessage(t *testing.T) {
+	senderPub, senderPriv := generateTestKeyPair(t)
+	recipientPub, recipientPriv := generateTestKeyPair(t)
+
+	message := []byte("Hi")
+
+	encrypted, err := EncryptV1(message, recipientPub, senderPriv)
+	if err != nil {
+		t.Fatalf("EncryptV1 failed: %v", err)
+	}
+
+	// Short messages should not be compressed (zlib overhead > savings).
+	// Just verify roundtrip works.
+	decrypted, err := DecryptV1(encrypted, senderPub, recipientPriv)
+	if err != nil {
+		t.Fatalf("DecryptV1 failed: %v", err)
+	}
+
+	if !bytes.Equal(decrypted, message) {
+		t.Errorf("decrypted = %q, want %q", decrypted, message)
+	}
+}
+
+func TestEncryptV1CompressibleMessage(t *testing.T) {
+	senderPub, senderPriv := generateTestKeyPair(t)
+	recipientPub, recipientPriv := generateTestKeyPair(t)
+
+	// Highly repetitive text that compresses well.
+	message := bytes.Repeat([]byte("AAAA"), 60) // 240 bytes
+
+	encrypted, err := EncryptV1(message, recipientPub, senderPriv)
+	if err != nil {
+		t.Fatalf("EncryptV1 failed: %v", err)
+	}
+
+	// Must start with GL1: prefix.
+	if !HasMagicPrefix(encrypted) {
+		t.Error("encrypted output does not start with GL1: prefix")
+	}
+
+	decrypted, err := DecryptV1(encrypted, senderPub, recipientPriv)
+	if err != nil {
+		t.Fatalf("DecryptV1 failed: %v", err)
+	}
+
+	if !bytes.Equal(decrypted, message) {
+		t.Errorf("roundtrip failed for compressible message")
+	}
+}
+
+func TestEncryptV1OutputWithinMemoLimit(t *testing.T) {
+	_, senderPriv := generateTestKeyPair(t)
+	recipientPub, _ := generateTestKeyPair(t)
+
+	message := []byte("Memo limit test message for V1 format.")
+
+	encrypted, err := EncryptV1(message, recipientPub, senderPriv)
+	if err != nil {
+		t.Fatalf("EncryptV1 failed: %v", err)
+	}
+
+	if len(encrypted) > SolanaMemoLimit {
+		t.Errorf("encrypted output %d bytes exceeds Memo limit %d", len(encrypted), SolanaMemoLimit)
+	}
+}
+
+func TestEncryptV1LargeCompressibleMessage(t *testing.T) {
+	senderPub, senderPriv := generateTestKeyPair(t)
+	recipientPub, recipientPriv := generateTestKeyPair(t)
+
+	// 600 bytes of repetitive text — exceeds old 344 limit but compresses well.
+	message := bytes.Repeat([]byte("GhostLink is awesome! "), 30) // 660 bytes
+
+	encrypted, err := EncryptV1(message, recipientPub, senderPriv)
+	if err != nil {
+		t.Fatalf("EncryptV1 failed for large compressible message: %v", err)
+	}
+
+	if len(encrypted) > SolanaMemoLimit {
+		t.Errorf("encrypted output %d bytes exceeds Memo limit %d", len(encrypted), SolanaMemoLimit)
+	}
+
+	decrypted, err := DecryptV1(encrypted, senderPub, recipientPriv)
+	if err != nil {
+		t.Fatalf("DecryptV1 failed: %v", err)
+	}
+
+	if !bytes.Equal(decrypted, message) {
+		t.Error("roundtrip failed for large compressible message")
+	}
+}
+
+func TestEncryptV1MessageTooLarge(t *testing.T) {
+	_, senderPriv := generateTestKeyPair(t)
+	recipientPub, _ := generateTestKeyPair(t)
+
+	// Random data doesn't compress — 341 bytes exceeds MaxPayloadV1-1 = 340.
+	message := make([]byte, MaxMessageSizeV1()+1)
+	if _, err := rand.Read(message); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := EncryptV1(message, recipientPub, senderPriv)
+	if err == nil {
+		t.Fatal("EncryptV1 should have failed for oversized incompressible message")
+	}
+	if !errors.Is(err, ErrMessageTooLarge) {
+		t.Errorf("expected ErrMessageTooLarge, got: %v", err)
+	}
+}
+
+func TestDecryptV1MissingPrefix(t *testing.T) {
+	senderPub, _ := generateTestKeyPair(t)
+	_, recipientPriv := generateTestKeyPair(t)
+
+	// Valid base64 but no GL1: prefix.
+	_, err := DecryptV1([]byte("AAAA"), senderPub, recipientPriv)
+	if err == nil {
+		t.Fatal("DecryptV1 should fail without GL1: prefix")
+	}
+	if !errors.Is(err, ErrInvalidCiphertext) {
+		t.Errorf("expected ErrInvalidCiphertext, got: %v", err)
+	}
+}
+
+func TestDecryptV1WrongKey(t *testing.T) {
+	_, senderPriv := generateTestKeyPair(t)
+	recipientPub, _ := generateTestKeyPair(t)
+	wrongPub, _ := generateTestKeyPair(t)
+	_, wrongPriv := generateTestKeyPair(t)
+
+	encrypted, err := EncryptV1([]byte("secret"), recipientPub, senderPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = DecryptV1(encrypted, wrongPub, wrongPriv)
+	if err == nil {
+		t.Fatal("DecryptV1 with wrong keys should fail")
+	}
+	if !errors.Is(err, ErrDecryptionFailed) {
+		t.Errorf("expected ErrDecryptionFailed, got: %v", err)
+	}
+}
+
+func TestDecryptV1TamperedCiphertext(t *testing.T) {
+	senderPub, senderPriv := generateTestKeyPair(t)
+	recipientPub, recipientPriv := generateTestKeyPair(t)
+
+	encrypted, err := EncryptV1([]byte("tamper test"), recipientPub, senderPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Tamper with a byte in the base64 payload (after the prefix).
+	tampered := make([]byte, len(encrypted))
+	copy(tampered, encrypted)
+	tampered[magicPrefixLen+10] ^= 0xff
+
+	_, err = DecryptV1(tampered, senderPub, recipientPriv)
+	if err == nil {
+		t.Fatal("DecryptV1 of tampered ciphertext should fail")
+	}
+}
+
+func TestDecryptV1UnknownFlag(t *testing.T) {
+	senderPub, senderPriv := generateTestKeyPair(t)
+	recipientPub, recipientPriv := generateTestKeyPair(t)
+
+	// Encrypt manually with an invalid flag byte.
+	recipientX25519, _ := ed25519PubKeyToX25519(recipientPub)
+	senderX25519, _ := ed25519PrivKeyToX25519(senderPriv)
+
+	inner := []byte{0xFF, 'h', 'e', 'l', 'l', 'o'} // 0xFF = unknown flag
+
+	var nonce [NonceSize]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		t.Fatal(err)
+	}
+	out := make([]byte, NonceSize)
+	copy(out, nonce[:])
+	out = box.Seal(out, inner, &nonce, recipientX25519, senderX25519)
+
+	encoded := []byte(MagicPrefix + base64.StdEncoding.EncodeToString(out))
+
+	_, err := DecryptV1(encoded, senderPub, recipientPriv)
+	if err == nil {
+		t.Fatal("DecryptV1 with unknown flag should fail")
+	}
+	if !errors.Is(err, ErrInvalidCiphertext) {
+		t.Errorf("expected ErrInvalidCiphertext, got: %v", err)
+	}
+}
+
+func TestHasMagicPrefix(t *testing.T) {
+	if !HasMagicPrefix([]byte("GL1:somedata")) {
+		t.Error("expected true for GL1: prefix")
+	}
+	if HasMagicPrefix([]byte("GL2:somedata")) {
+		t.Error("expected false for GL2: prefix")
+	}
+	if HasMagicPrefix([]byte("short")) {
+		t.Error("expected false for data without prefix")
+	}
+	if HasMagicPrefix([]byte("")) {
+		t.Error("expected false for empty data")
+	}
+}
+
+func TestBackwardCompat(t *testing.T) {
+	senderPub, senderPriv := generateTestKeyPair(t)
+	recipientPub, recipientPriv := generateTestKeyPair(t)
+
+	message := []byte("backward compat test")
+
+	// Old Encrypt output can still be decrypted by old Decrypt.
+	oldEncrypted, err := Encrypt(message, recipientPub, senderPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decrypted, err := Decrypt(oldEncrypted, senderPub, recipientPriv)
+	if err != nil {
+		t.Fatalf("old Decrypt failed on old Encrypt output: %v", err)
+	}
+	if !bytes.Equal(decrypted, message) {
+		t.Error("old roundtrip failed")
+	}
+
+	// New EncryptV1 output should NOT be decryptable by old Decrypt
+	// (the GL1: prefix makes it invalid base64 for the old path).
+	newEncrypted, err := EncryptV1(message, recipientPub, senderPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Decrypt(newEncrypted, senderPub, recipientPriv)
+	if err == nil {
+		t.Error("old Decrypt should fail on EncryptV1 output")
+	}
+
+	// Old Encrypt output should NOT have the magic prefix.
+	if HasMagicPrefix(oldEncrypted) {
+		t.Error("old Encrypt output should not have GL1: prefix")
+	}
+
+	// New EncryptV1 output should have the magic prefix.
+	if !HasMagicPrefix(newEncrypted) {
+		t.Error("EncryptV1 output should have GL1: prefix")
+	}
+}
+
+func TestMaxMessageSizeV1(t *testing.T) {
+	// MaxPayloadV1 = 341, minus 1 flag byte = 340.
+	expected := 340
+	got := MaxMessageSizeV1()
+	if got != expected {
+		t.Errorf("MaxMessageSizeV1() = %d, want %d", got, expected)
 	}
 }
 

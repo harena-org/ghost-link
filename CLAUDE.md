@@ -69,9 +69,11 @@ The MCP server must never prompt interactively — if a wallet is encrypted and 
 
 ### Encryption Flow
 
-**Send**: plaintext → JSON envelope (`message.Encode`) → NaCl box encrypt (sender X25519 priv + recipient X25519 pub) → prepend 24-byte nonce → base64 encode → Solana Memo transaction (≤512 bytes)
+**V1 Send (current)**: plaintext → JSON envelope (`message.Encode`) → zlib compress (if beneficial, flag=0x01; else raw, flag=0x00) → prepend flag byte → NaCl box encrypt → prepend 24-byte nonce → base64 encode → prepend `GL1:` prefix → Solana Memo transaction (≤512 bytes)
 
-**Receive**: fetch Memo transactions → base64 decode → extract nonce → NaCl box decrypt → `message.Decode` (returns nil for legacy raw text, falls back to `string(plaintext)`)
+**V1 Receive**: check for `GL1:` prefix → strip prefix → base64 decode → extract nonce → NaCl box decrypt → read flag byte → decompress if flag=0x01 → `message.Decode`
+
+**Legacy Receive**: no `GL1:` prefix → base64 decode → extract nonce → NaCl box decrypt → `message.Decode` (old `Decrypt` path, backward compatible)
 
 Key conversion: Ed25519 → X25519 via `filippo.io/edwards25519` birational map (public) and SHA-512 + clamping (private).
 
@@ -91,7 +93,7 @@ type Envelope struct {
 
 ### Message Size Constraint
 
-Max plaintext = 344 bytes. After encryption: +24 (nonce) +16 (Poly1305 tag) = 384 bytes binary → 512 bytes base64 (Solana Memo limit).
+V1 wire format: `GL1:` (4B) + base64(nonce[24B] + NaCl_box(flag[1B] + payload)). Max uncompressed payload = 340 bytes. With zlib compression (~50-60% for typical text), effective capacity is ~600-800 bytes. Legacy format (no prefix): max plaintext = 344 bytes.
 
 ### Solana Transaction Structure
 

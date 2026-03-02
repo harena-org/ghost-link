@@ -76,13 +76,6 @@ func runSend(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to encode envelope: %w", err)
 	}
 
-	// Validate message size
-	maxSize := ghostcrypto.MaxMessageSize()
-	if len(envBytes) > maxSize {
-		return exitcode.Wrap(exitcode.MessageTooLarge,
-			fmt.Errorf("message too long: %d bytes (envelope), max %d bytes", len(envBytes), maxSize))
-	}
-
 	// Load wallet
 	w, err := getWalletFromFlags()
 	if err != nil {
@@ -99,7 +92,7 @@ func runSend(cmd *cobra.Command, args []string) error {
 	senderPrivKey := ed25519.PrivateKey(w.PrivateKey())
 	recipientEdPubKey := ed25519.PublicKey(recipientPubKey[:])
 
-	encrypted, err := ghostcrypto.Encrypt(envBytes, recipientEdPubKey, senderPrivKey)
+	encrypted, err := ghostcrypto.EncryptV1(envBytes, recipientEdPubKey, senderPrivKey)
 	if err != nil {
 		return exitcode.Wrap(exitcode.MessageTooLarge, fmt.Errorf("failed to encrypt message: %w", err))
 	}

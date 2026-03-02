@@ -224,9 +224,15 @@ func decryptMemos(memos []ghostsolana.MemoMessage, recipientPrivKey ed25519.Priv
 			continue
 		}
 
-		// Try to decrypt
+		// Try to decrypt (V1 format with GL1: prefix, or legacy format)
 		senderPubKey := ed25519.PublicKey(memo.Sender[:])
-		plaintext, err := ghostcrypto.Decrypt(memo.Data, senderPubKey, recipientPrivKey)
+		var plaintext []byte
+		var err error
+		if ghostcrypto.HasMagicPrefix(memo.Data) {
+			plaintext, err = ghostcrypto.DecryptV1(memo.Data, senderPubKey, recipientPrivKey)
+		} else {
+			plaintext, err = ghostcrypto.Decrypt(memo.Data, senderPubKey, recipientPrivKey)
+		}
 		if err != nil {
 			continue
 		}

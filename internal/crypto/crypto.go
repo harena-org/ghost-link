@@ -3,12 +3,15 @@
 package crypto
 
 import (
+	"bytes"
+	"compress/zlib"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha512"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 
 	"filippo.io/edwards25519"
 	"golang.org/x/crypto/nacl/box"
@@ -26,6 +29,30 @@ const (
 
 	// maxCiphertext is the maximum ciphertext size (nonce + encrypted + auth tag).
 	maxCiphertext = SolanaMemoLimit
+
+	// MagicPrefix is the 4-byte plaintext prefix for V1 wire format.
+	// Enables O(1) filtering of GhostLink memos without decryption.
+	MagicPrefix = "GL1:"
+
+	// magicPrefixLen must match len(MagicPrefix).
+	magicPrefixLen = 4
+
+	// FlagNoCompression indicates the payload is not compressed.
+	FlagNoCompression byte = 0x00
+
+	// FlagZlibCompressed indicates the payload is zlib-compressed.
+	FlagZlibCompressed byte = 0x01
+
+	// maxBinaryV1 is the max binary bytes after base64-decoding the payload after the prefix.
+	// (512 - 4) / 4 * 3 = 381
+	maxBinaryV1 = (SolanaMemoLimit - magicPrefixLen) / 4 * 3
+
+	// MaxPayloadV1 is the max inner plaintext (after NaCl overhead is removed).
+	// 381 - 24 - 16 = 341
+	MaxPayloadV1 = maxBinaryV1 - NonceSize - Poly1305Overhead
+
+	// zlibDecompressLimit is a defense-in-depth cap on decompressed output.
+	zlibDecompressLimit = 4096
 )
 
 var (
@@ -146,6 +173,164 @@ func Decrypt(encrypted []byte, senderPubKey ed25519.PublicKey, recipientPrivKey 
 	}
 
 	return plaintext, nil
+}
+
+// MaxMessageSizeV1 returns the maximum plaintext message size for the V1 wire
+// format. The flag byte uses 1 byte of the inner plaintext, leaving 340 bytes
+// for the (possibly compressed) payload.
+func MaxMessageSizeV1() int {
+	return MaxPayloadV1 - 1 // 340
+}
+
+// HasMagicPrefix returns true if data starts with the GL1: magic prefix.
+func HasMagicPrefix(data []byte) bool {
+	return bytes.HasPrefix(data, []byte(MagicPrefix))
+}
+
+// EncryptV1 encrypts a message using the V1 wire format:
+//
+//	GL1: + base64(nonce[24] || NaCl_box(flag[1] || payload))
+//
+// The message is zlib-compressed if compression reduces size. The flag byte
+// indicates whether compression was applied. Returns ErrMessageTooLarge if the
+// (possibly compressed) payload exceeds the V1 size budget.
+func EncryptV1(message []byte, recipientPubKey ed25519.PublicKey, senderPrivKey ed25519.PrivateKey) ([]byte, error) {
+	// Try compression.
+	flag := FlagZlibCompressed
+	payload, err := zlibCompress(message)
+	if err != nil || len(payload) >= len(message) {
+		// Compression unhelpful or failed — store raw.
+		flag = FlagNoCompression
+		payload = message
+	}
+
+	// 1 byte flag + payload must fit in MaxPayloadV1.
+	innerLen := 1 + len(payload)
+	if innerLen > MaxPayloadV1 {
+		return nil, fmt.Errorf("%w: payload is %d bytes (after compression), max is %d",
+			ErrMessageTooLarge, len(payload), MaxPayloadV1-1)
+	}
+
+	// Build inner plaintext: flag || payload.
+	inner := make([]byte, innerLen)
+	inner[0] = flag
+	copy(inner[1:], payload)
+
+	// Convert keys.
+	recipientX25519, err := ed25519PubKeyToX25519(recipientPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("%w: recipient public key: %v", ErrKeyConversion, err)
+	}
+	senderX25519, err := ed25519PrivKeyToX25519(senderPrivKey)
+	if err != nil {
+		return nil, fmt.Errorf("%w: sender private key: %v", ErrKeyConversion, err)
+	}
+
+	// Generate nonce.
+	var nonce [NonceSize]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return nil, fmt.Errorf("crypto: failed to generate nonce: %w", err)
+	}
+
+	// Encrypt.
+	out := make([]byte, NonceSize)
+	copy(out, nonce[:])
+	out = box.Seal(out, inner, &nonce, recipientX25519, senderX25519)
+
+	// Base64 encode and prepend magic prefix.
+	encoded := MagicPrefix + base64.StdEncoding.EncodeToString(out)
+
+	if len(encoded) > SolanaMemoLimit {
+		return nil, ErrMessageTooLarge
+	}
+
+	return []byte(encoded), nil
+}
+
+// DecryptV1 decrypts a V1 wire-format message (must start with GL1:).
+func DecryptV1(encrypted []byte, senderPubKey ed25519.PublicKey, recipientPrivKey ed25519.PrivateKey) ([]byte, error) {
+	if !HasMagicPrefix(encrypted) {
+		return nil, fmt.Errorf("%w: missing GL1: prefix", ErrInvalidCiphertext)
+	}
+
+	// Strip prefix and base64-decode.
+	b64 := encrypted[magicPrefixLen:]
+	raw, err := base64.StdEncoding.DecodeString(string(b64))
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid base64: %v", ErrInvalidCiphertext, err)
+	}
+
+	if len(raw) < NonceSize+Poly1305Overhead+1 { // +1 for flag byte
+		return nil, ErrInvalidCiphertext
+	}
+
+	// Extract nonce.
+	var nonce [NonceSize]byte
+	copy(nonce[:], raw[:NonceSize])
+	ciphertext := raw[NonceSize:]
+
+	// Convert keys.
+	senderX25519, err := ed25519PubKeyToX25519(senderPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("%w: sender public key: %v", ErrKeyConversion, err)
+	}
+	recipientX25519, err := ed25519PrivKeyToX25519(recipientPrivKey)
+	if err != nil {
+		return nil, fmt.Errorf("%w: recipient private key: %v", ErrKeyConversion, err)
+	}
+
+	// Decrypt.
+	inner, ok := box.Open(nil, ciphertext, &nonce, senderX25519, recipientX25519)
+	if !ok {
+		return nil, ErrDecryptionFailed
+	}
+
+	if len(inner) < 1 {
+		return nil, fmt.Errorf("%w: empty inner plaintext", ErrInvalidCiphertext)
+	}
+
+	flag := inner[0]
+	payload := inner[1:]
+
+	switch flag {
+	case FlagNoCompression:
+		return payload, nil
+	case FlagZlibCompressed:
+		return zlibDecompress(payload)
+	default:
+		return nil, fmt.Errorf("%w: unknown flag byte 0x%02x", ErrInvalidCiphertext, flag)
+	}
+}
+
+// zlibCompress compresses src using zlib at BestCompression level.
+func zlibCompress(src []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	w, err := zlib.NewWriterLevel(&buf, zlib.BestCompression)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := w.Write(src); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// zlibDecompress decompresses src with a safety cap of zlibDecompressLimit bytes.
+func zlibDecompress(src []byte) ([]byte, error) {
+	r, err := zlib.NewReader(bytes.NewReader(src))
+	if err != nil {
+		return nil, fmt.Errorf("%w: zlib header: %v", ErrInvalidCiphertext, err)
+	}
+	defer r.Close()
+
+	data, err := io.ReadAll(io.LimitReader(r, zlibDecompressLimit))
+	if err != nil {
+		return nil, fmt.Errorf("%w: zlib decompress: %v", ErrInvalidCiphertext, err)
+	}
+	return data, nil
 }
 
 // ed25519PubKeyToX25519 converts an Ed25519 public key to an X25519 public key

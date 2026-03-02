@@ -38,7 +38,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		"default_inbox":    cfg.DefaultInbox,
 		"tor_enabled":      torFlag || cfg.TorEnabled,
 		"tor_proxy":        cfg.TorProxy,
-		"max_message_size": ghostcrypto.MaxMessageSize(),
+		"max_message_size": ghostcrypto.MaxMessageSizeV1(),
 	}
 
 	// Check RPC reachability
@@ -119,7 +119,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Println("Tor:              disabled")
 		}
-		fmt.Printf("Max Message Size: %d bytes\n", ghostcrypto.MaxMessageSize())
+		fmt.Printf("Max Message Size: %d bytes\n", ghostcrypto.MaxMessageSizeV1())
 	})
 
 	return nil

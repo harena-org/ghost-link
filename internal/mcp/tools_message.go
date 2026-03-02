@@ -65,11 +65,6 @@ func registerMessageTools(server *mcpsdk.Server, cfg *ServerConfig) {
 			return nil, nil, fmt.Errorf("failed to encode envelope: %w", err)
 		}
 
-		maxSize := ghostcrypto.MaxMessageSize()
-		if len(envBytes) > maxSize {
-			return nil, nil, fmt.Errorf("message too long: %d bytes (envelope), max %d bytes", len(envBytes), maxSize)
-		}
-
 		w, err := resolveWallet(cfg, input.PrivateKey)
 		if err != nil {
 			return nil, nil, err
@@ -83,7 +78,7 @@ func registerMessageTools(server *mcpsdk.Server, cfg *ServerConfig) {
 		senderPrivKey := ed25519.PrivateKey(w.PrivateKey())
 		recipientEdPubKey := ed25519.PublicKey(recipientPubKey[:])
 
-		encrypted, err := ghostcrypto.Encrypt(envBytes, recipientEdPubKey, senderPrivKey)
+		encrypted, err := ghostcrypto.EncryptV1(envBytes, recipientEdPubKey, senderPrivKey)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to encrypt message: %w", err)
 		}
@@ -235,7 +230,13 @@ func decryptMemos(memos []ghostsolana.MemoMessage, recipientPrivKey ed25519.Priv
 		}
 
 		senderPubKey := ed25519.PublicKey(memo.Sender[:])
-		plaintext, err := ghostcrypto.Decrypt(memo.Data, senderPubKey, recipientPrivKey)
+		var plaintext []byte
+		var err error
+		if ghostcrypto.HasMagicPrefix(memo.Data) {
+			plaintext, err = ghostcrypto.DecryptV1(memo.Data, senderPubKey, recipientPrivKey)
+		} else {
+			plaintext, err = ghostcrypto.Decrypt(memo.Data, senderPubKey, recipientPrivKey)
+		}
 		if err != nil {
 			continue
 		}
