@@ -2,6 +2,8 @@
 
 End-to-end encrypted peer-to-peer messaging tool built on the Solana blockchain. Uses on-chain Memo storage and NaCl box asymmetric encryption for fully private messaging — only the recipient can decrypt and read messages.
 
+![GhostLink](docs/GhostLink.jpg)
+
 ## Features
 
 - **End-to-end encryption** — NaCl box (Curve25519/XSalsa20/Poly1305), only the recipient's private key can decrypt
