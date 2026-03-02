@@ -7,6 +7,8 @@ End-to-end encrypted peer-to-peer messaging tool built on the Solana blockchain.
 ## Features
 
 - **End-to-end encryption** — NaCl box (Curve25519/XSalsa20/Poly1305), only the recipient's private key can decrypt
+- **Zlib compression** — Automatic compression before encryption, ~2x effective message capacity for typical text
+- **Fast memo filtering** — `GL1:` magic header prefix enables O(1) identification of GhostLink memos without decryption
 - **On-chain storage** — Messages stored via Solana Memo Program, immutable and censorship-resistant
 - **Stealth inboxes** — Locally generated inbox addresses, shared via QR code
 - **MCP server** — Built-in Model Context Protocol server for native AI agent integration
@@ -150,7 +152,7 @@ ghostlink send --to <recipient-address> -m "Message content"
 | `--to` | Recipient Solana address | Yes |
 | `-m, --message` | Message content (plaintext) | Yes |
 
-**Limit:** Max ~344 bytes plaintext (encrypted + base64 encoded must fit in 512-byte Memo).
+**Limit:** Max 340 bytes uncompressed payload. With automatic zlib compression, typical text messages of ~600-800 bytes will fit within the 512-byte Solana Memo limit.
 
 ### receive — Receive Messages
 
@@ -374,7 +376,9 @@ ghost-link/
 | Language | Go |
 | Blockchain | Solana (devnet / testnet / mainnet) |
 | Storage | Solana Memo Program (≤ 512 bytes) |
+| Wire Format | `GL1:` prefix + base64(nonce + NaCl_box(flag + payload)) |
 | Encryption | NaCl box (Curve25519 + XSalsa20 + Poly1305) |
+| Compression | Zlib (auto, applied when beneficial) |
 | Keys | Ed25519 → X25519 conversion |
 | Wallet Encryption | scrypt + AES-256-GCM |
 | Mnemonic | BIP39 (24 words / 256-bit entropy) |
